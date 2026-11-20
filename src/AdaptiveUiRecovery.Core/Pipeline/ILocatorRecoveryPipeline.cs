@@ -8,9 +8,7 @@ namespace AdaptiveUiRecovery.Core.Pipeline;
 public interface ILocatorRecoveryPipeline
 {
     Task<HealingResult?> TryRecoverAsync(
-        CallerContext caller,
-        string failedSelector,
-        Exception failure,
+        RecoveryRequest request,
         CancellationToken cancellationToken = default);
 }
 
@@ -19,24 +17,35 @@ public interface ILocatorRecoveryPipeline
 /// </summary>
 public sealed class DelegateRecoveryPipeline : ILocatorRecoveryPipeline
 {
-    private readonly Func<CallerContext, string, Exception, CancellationToken, Task<HealingResult?>> _handler;
+    private readonly Func<RecoveryRequest, CancellationToken, Task<HealingResult?>> _handler;
+
+    public DelegateRecoveryPipeline(
+        Func<RecoveryRequest, CancellationToken, Task<HealingResult?>> handler)
+    {
+        _handler = handler ?? throw new ArgumentNullException(nameof(handler));
+    }
+
+    public DelegateRecoveryPipeline(Func<RecoveryRequest, HealingResult?> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        _handler = (request, _) => Task.FromResult(handler(request));
+    }
 
     public DelegateRecoveryPipeline(
         Func<CallerContext, string, Exception, CancellationToken, Task<HealingResult?>> handler)
     {
-        _handler = handler ?? throw new ArgumentNullException(nameof(handler));
+        ArgumentNullException.ThrowIfNull(handler);
+        _handler = (request, ct) => handler(request.Caller, request.FailedSelector, request.Failure, ct);
     }
 
     public DelegateRecoveryPipeline(Func<CallerContext, string, Exception, HealingResult?> handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
-        _handler = (caller, selector, failure, _) => Task.FromResult(handler(caller, selector, failure));
+        _handler = (request, _) => Task.FromResult(handler(request.Caller, request.FailedSelector, request.Failure));
     }
 
     public Task<HealingResult?> TryRecoverAsync(
-        CallerContext caller,
-        string failedSelector,
-        Exception failure,
+        RecoveryRequest request,
         CancellationToken cancellationToken = default)
-        => _handler(caller, failedSelector, failure, cancellationToken);
+        => _handler(request, cancellationToken);
 }
