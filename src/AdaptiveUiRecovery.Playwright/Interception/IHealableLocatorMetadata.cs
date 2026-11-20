@@ -21,5 +21,7 @@ public interface IHealableLocatorMetadata
 
     double? LastInterceptionElapsedMs { get; }
 
-    Task<ILocator> ResolveNativeLocatorAsync();
+    Task<ILocator> ResolveNativeLocatorAsync(
+        string actionName = "ResolveNativeLocatorAsync",
+        bool requireVisible = true);
 }

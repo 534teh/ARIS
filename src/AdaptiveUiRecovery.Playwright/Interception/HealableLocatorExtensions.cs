@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -12,6 +13,8 @@ namespace AdaptiveUiRecovery.Playwright.Interception;
 /// </summary>
 public static class HealableLocatorExtensions
 {
+    private static readonly ConcurrentDictionary<(string FilePath, int LineNumber, string MemberName, string LocatorExpr), CallerContext> CallerContextCache = new();
+
     /// <summary>
     /// Wraps any Playwright <see cref="ILocator"/> (e.g. <c>Page.GetByRole(...).Heal()</c>) in a healable proxy
     /// while capturing repository-relative caller location and full C# expression metadata.
@@ -34,17 +37,21 @@ public static class HealableLocatorExtensions
         InterceptionOptions options = scope?.Options ?? InterceptionOptions.FromEnvironment();
         ILocatorRecoveryPipeline? pipeline = scope?.Pipeline;
 
-        string relativePath = PathNormalizer.NormalizeToRepoRelative(filePath);
-        string className = ResolveDeclaringClassName(memberName, filePath);
+        CallerContext caller = CallerContextCache.GetOrAdd(
+            (filePath, lineNumber, memberName, locatorExpr),
+            static key =>
+            {
+                string relativePath = PathNormalizer.NormalizeToRepoRelative(key.FilePath);
+                string className = ResolveDeclaringClassName(key.MemberName, key.FilePath);
+                return new CallerContext(
+                    RelativeFilePath: relativePath,
+                    ClassName: className,
+                    MemberName: key.MemberName,
+                    LineNumber: key.LineNumber,
+                    LocatorExpression: key.LocatorExpr);
+            });
 
-        var caller = new CallerContext(
-            RelativeFilePath: relativePath,
-            ClassName: className,
-            MemberName: memberName,
-            LineNumber: lineNumber,
-            LocatorExpression: locatorExpr);
-
-        return HealableLocatorProxy.Create(locator, caller, options, pipeline);
+        return HealableLocatorProxy.Create(locator, caller, options, pipeline, scope);
     }
 
     /// <summary>
@@ -65,7 +72,6 @@ public static class HealableLocatorExtensions
                 continue;
             }
 
-            // Unwrap compiler-generated async/iterator state machines when needed.
             if (declaringType.GetCustomAttribute<CompilerGeneratedAttribute>() is not null
                 && declaringType.DeclaringType is not null)
             {

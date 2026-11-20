@@ -85,7 +85,16 @@ public class HealableAssertionsProxy : DispatchProxy
             return _locatorProxy.CurrentNativeLocator;
         }
 
-        return await _locatorProxy.ResolveNativeLocatorAsync().ConfigureAwait(false);
+        bool requireVisible = methodName is nameof(ILocatorAssertions.ToBeVisibleAsync)
+            or nameof(ILocatorAssertions.ToBeEnabledAsync)
+            or nameof(ILocatorAssertions.ToBeEditableAsync)
+            or nameof(ILocatorAssertions.ToBeCheckedAsync)
+            or nameof(ILocatorAssertions.ToBeFocusedAsync)
+            or nameof(ILocatorAssertions.ToBeInViewportAsync);
+
+        return await _locatorProxy
+            .ResolveNativeLocatorAsync(actionName: methodName, requireVisible: requireVisible)
+            .ConfigureAwait(false);
     }
 
     private bool RequiresPresentElement(string methodName, object?[]? args)
@@ -105,6 +114,20 @@ public class HealableAssertionsProxy : DispatchProxy
             && args is { Length: > 0 }
             && args[0] is int expectedCount
             && expectedCount == 0)
+        {
+            return false;
+        }
+
+        if (methodName == nameof(ILocatorAssertions.ToBeVisibleAsync)
+            && args is { Length: > 0 }
+            && args[0] is LocatorAssertionsToBeVisibleOptions { Visible: false })
+        {
+            return false;
+        }
+
+        if (methodName == nameof(ILocatorAssertions.ToBeAttachedAsync)
+            && args is { Length: > 0 }
+            && args[0] is LocatorAssertionsToBeAttachedOptions { Attached: false })
         {
             return false;
         }

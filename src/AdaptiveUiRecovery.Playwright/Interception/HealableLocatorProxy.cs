@@ -12,7 +12,7 @@ namespace AdaptiveUiRecovery.Playwright.Interception;
 /// </summary>
 public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
 {
-    private static readonly HashSet<string> InterceptedActionMethods = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> VisibilityRequiredActionMethods = new(StringComparer.Ordinal)
     {
         nameof(ILocator.ClickAsync),
         nameof(ILocator.DblClickAsync),
@@ -28,20 +28,24 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
         nameof(ILocator.SelectOptionAsync),
         nameof(ILocator.HoverAsync),
         nameof(ILocator.FocusAsync),
-        nameof(ILocator.BlurAsync),
         nameof(ILocator.SetInputFilesAsync),
         nameof(ILocator.SelectTextAsync),
         nameof(ILocator.ScrollIntoViewIfNeededAsync),
-        nameof(ILocator.DispatchEventAsync),
         nameof(ILocator.InnerTextAsync),
-        nameof(ILocator.InnerHTMLAsync),
-        nameof(ILocator.TextContentAsync),
         nameof(ILocator.InputValueAsync),
-        nameof(ILocator.GetAttributeAsync),
         nameof(ILocator.BoundingBoxAsync),
         nameof(ILocator.ScreenshotAsync),
-        nameof(ILocator.HighlightAsync),
         nameof(ILocator.DragToAsync)
+    };
+
+    private static readonly HashSet<string> AttachmentOnlyActionMethods = new(StringComparer.Ordinal)
+    {
+        nameof(ILocator.BlurAsync),
+        nameof(ILocator.DispatchEventAsync),
+        nameof(ILocator.InnerHTMLAsync),
+        nameof(ILocator.TextContentAsync),
+        nameof(ILocator.GetAttributeAsync),
+        nameof(ILocator.HighlightAsync)
     };
 
     private static readonly MethodInfo GenericInterceptMethod = typeof(HealableLocatorProxy)
@@ -52,6 +56,7 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
     private CallerContext _caller = default!;
     private InterceptionOptions _options = new();
     private ILocatorRecoveryPipeline? _pipeline;
+    private HealableExecutionScope? _scope;
 
     public HealableLocatorProxy()
     {
@@ -76,14 +81,20 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
         ILocator rawLocator,
         CallerContext caller,
         InterceptionOptions? options = null,
-        ILocatorRecoveryPipeline? pipeline = null)
+        ILocatorRecoveryPipeline? pipeline = null,
+        HealableExecutionScope? scope = null)
     {
         ArgumentNullException.ThrowIfNull(rawLocator);
         ArgumentNullException.ThrowIfNull(caller);
 
         ILocator proxy = Create<ILocator, HealableLocatorProxy>();
         var state = (HealableLocatorProxy)proxy;
-        state.Initialize(rawLocator, caller, options ?? InterceptionOptions.FromEnvironment(), pipeline);
+        state.Initialize(
+            rawLocator,
+            caller,
+            options ?? InterceptionOptions.FromEnvironment(),
+            pipeline,
+            scope ?? HealableExecutionScope.Current);
         return proxy;
     }
 
@@ -91,18 +102,37 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
         ILocator rawLocator,
         CallerContext caller,
         InterceptionOptions options,
-        ILocatorRecoveryPipeline? pipeline)
+        ILocatorRecoveryPipeline? pipeline,
+        HealableExecutionScope? scope)
     {
         _rawLocator = rawLocator;
         _caller = caller;
         _options = options;
         _pipeline = pipeline;
+        _scope = scope;
+
+        if (_scope is not null && _scope.TryGetCachedHeal(_caller, out HealingResult? cachedResult))
+        {
+            _resolvedLocator = _rawLocator.Page.Locator(cachedResult.HealedSelector);
+            WasHealed = true;
+            LastHealingResult = cachedResult;
+        }
     }
 
-    public async Task<ILocator> ResolveNativeLocatorAsync()
+    public async Task<ILocator> ResolveNativeLocatorAsync(
+        string actionName = "ResolveNativeLocatorAsync",
+        bool requireVisible = true)
     {
         if (_resolvedLocator is not null)
         {
+            return _resolvedLocator;
+        }
+
+        if (_scope is not null && _scope.TryGetCachedHeal(_caller, out HealingResult? cachedResult))
+        {
+            _resolvedLocator = _rawLocator.Page.Locator(cachedResult.HealedSelector);
+            WasHealed = true;
+            LastHealingResult = cachedResult;
             return _resolvedLocator;
         }
 
@@ -116,7 +146,7 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
         {
             await _rawLocator.WaitForAsync(new LocatorWaitForOptions
             {
-                State = WaitForSelectorState.Attached,
+                State = requireVisible ? WaitForSelectorState.Visible : WaitForSelectorState.Attached,
                 Timeout = _options.FastFailTimeoutMs
             }).ConfigureAwait(false);
 
@@ -124,11 +154,11 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
         }
         catch (TimeoutException ex)
         {
-            return await HandleFastFailAsync(ex, startTimestamp).ConfigureAwait(false);
+            return await HandleFastFailAsync(ex, startTimestamp, actionName, requireVisible).ConfigureAwait(false);
         }
         catch (PlaywrightException ex)
         {
-            return await HandleFastFailAsync(ex, startTimestamp).ConfigureAwait(false);
+            return await HandleFastFailAsync(ex, startTimestamp, actionName, requireVisible).ConfigureAwait(false);
         }
     }
 
@@ -141,11 +171,12 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
             return InvokeTarget(this, targetMethod, args);
         }
 
-        if (InterceptedActionMethods.Contains(targetMethod.Name))
+        bool isVisibilityAction = VisibilityRequiredActionMethods.Contains(targetMethod.Name);
+        if (isVisibilityAction || AttachmentOnlyActionMethods.Contains(targetMethod.Name))
         {
             if (targetMethod.ReturnType == typeof(Task))
             {
-                return InterceptVoidActionAsync(targetMethod, args);
+                return InterceptVoidActionAsync(targetMethod, args, targetMethod.Name, isVisibilityAction);
             }
 
             if (targetMethod.ReturnType.IsGenericType
@@ -153,7 +184,7 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
             {
                 Type resultType = targetMethod.ReturnType.GetGenericArguments()[0];
                 MethodInfo typedHelper = GenericInterceptMethod.MakeGenericMethod(resultType);
-                return typedHelper.Invoke(this, [targetMethod, args]);
+                return typedHelper.Invoke(this, [targetMethod, args, targetMethod.Name, isVisibilityAction]);
             }
         }
 
@@ -161,34 +192,41 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
 
         if (targetMethod.ReturnType == typeof(ILocator) && result is ILocator childLocator)
         {
-            return Create(childLocator, _caller, _options, _pipeline);
+            return Create(childLocator, _caller, _options, _pipeline, _scope);
         }
 
         return result;
     }
 
-    private async Task<ILocator> HandleFastFailAsync(Exception failure, long startTimestamp)
+    private async Task<ILocator> HandleFastFailAsync(
+        Exception failure,
+        long startTimestamp,
+        string actionName,
+        bool requireVisible)
     {
         LastInterceptionElapsedMs = Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
 
+        int domMatchCount = 0;
         try
         {
-            if (await _rawLocator.CountAsync().ConfigureAwait(false) > 0)
+            domMatchCount = await _rawLocator.CountAsync().ConfigureAwait(false);
+            if (!requireVisible && domMatchCount == 1)
             {
                 return _rawLocator;
             }
         }
         catch
         {
-            // Continue into recovery pipeline if CountAsync cannot resolve (e.g., strict-mode or invalid selector).
+            // Continue into recovery pipeline if CountAsync cannot resolve (e.g., invalid selector).
         }
 
         string failedSelector = ExtractSelector(_rawLocator);
 
         if (_pipeline is not null)
         {
+            var request = new RecoveryRequest(_caller, failedSelector, actionName, domMatchCount, failure);
             HealingResult? healingResult = await _pipeline
-                .TryRecoverAsync(_caller, failedSelector, failure)
+                .TryRecoverAsync(request)
                 .ConfigureAwait(false);
 
             if (healingResult is not null && !string.IsNullOrWhiteSpace(healingResult.HealedSelector))
@@ -199,6 +237,7 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
                     _resolvedLocator = candidateLocator;
                     WasHealed = true;
                     LastHealingResult = healingResult;
+                    _scope?.RecordHeal(_caller, healingResult);
                     return _resolvedLocator;
                 }
             }
@@ -206,20 +245,29 @@ public class HealableLocatorProxy : DispatchProxy, IHealableLocatorMetadata
 
         throw new PlaywrightException(
             $"Fast-fail interception triggered after {_options.FastFailTimeoutMs} ms for locator " +
-            $"'{_caller.CanonicalKey}' ({_caller.LocatorExpression}); selector '{failedSelector}' could not be resolved.",
+            $"'{_caller.CanonicalKey}' ({_caller.LocatorExpression}) during '{actionName}'; " +
+            $"selector '{failedSelector}' (Count={domMatchCount}) could not be resolved.",
             failure);
     }
 
-    private async Task InterceptVoidActionAsync(MethodInfo targetMethod, object?[]? args)
+    private async Task InterceptVoidActionAsync(
+        MethodInfo targetMethod,
+        object?[]? args,
+        string actionName,
+        bool requireVisible)
     {
-        ILocator nativeLocator = await ResolveNativeLocatorAsync().ConfigureAwait(false);
+        ILocator nativeLocator = await ResolveNativeLocatorAsync(actionName, requireVisible).ConfigureAwait(false);
         var task = (Task)InvokeTarget(nativeLocator, targetMethod, args)!;
         await task.ConfigureAwait(false);
     }
 
-    private async Task<TResult> InterceptGenericActionAsync<TResult>(MethodInfo targetMethod, object?[]? args)
+    private async Task<TResult> InterceptGenericActionAsync<TResult>(
+        MethodInfo targetMethod,
+        object?[]? args,
+        string actionName,
+        bool requireVisible)
     {
-        ILocator nativeLocator = await ResolveNativeLocatorAsync().ConfigureAwait(false);
+        ILocator nativeLocator = await ResolveNativeLocatorAsync(actionName, requireVisible).ConfigureAwait(false);
         var task = (Task<TResult>)InvokeTarget(nativeLocator, targetMethod, args)!;
         return await task.ConfigureAwait(false);
     }
