@@ -1,0 +1,9 @@
+services:
+  juice-shop:
+    image: mirror.gcr.io/bkimminich/juice-shop:latest
+    container_name: aris-juice-shop
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=unsafe
+    restart: unless-stopped
