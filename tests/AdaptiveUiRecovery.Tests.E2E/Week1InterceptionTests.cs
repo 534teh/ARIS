@@ -98,6 +98,7 @@ public sealed class Week1InterceptionTests : HealablePageTest
 
         await Expect(portal.WelcomeHeading).ToHaveTextAsync("Welcome, QA!");
         await Expect(portal.ErrorToast).ToBeHiddenAsync();
+        await Expect(portal.ErrorToast).ToBeVisibleAsync(new() { Visible = false });
     }
 
     [Test]
@@ -128,9 +129,15 @@ public sealed class Week1InterceptionTests : HealablePageTest
     {
         await Page.SetContentAsync(MutatedPortalHtml);
 
-        RecoveryPipeline = new DelegateRecoveryPipeline((caller, failedSelector, _) =>
+        int pipelineCallCount = 0;
+        RecoveryRequest? capturedRequest = null;
+
+        RecoveryPipeline = new DelegateRecoveryPipeline(request =>
         {
-            if (failedSelector.Contains("#legacy-submit-btn-v1", StringComparison.Ordinal))
+            pipelineCallCount++;
+            capturedRequest = request;
+
+            if (request.FailedSelector.Contains("#legacy-submit-btn-v1", StringComparison.Ordinal))
             {
                 return new HealingResult(
                     HealedSelector: "internal:role=button[name=\"Complete Sign In\"i]",
@@ -144,15 +151,18 @@ public sealed class Week1InterceptionTests : HealablePageTest
         });
 
         var portal = new SamplePortalPage(Page);
-        ILocator brokenButton = portal.BrokenSubmitButton;
 
-        await Expect(brokenButton).ToBeVisibleAsync();
-        await brokenButton.ClickAsync();
+        await Expect(portal.BrokenSubmitButton).ToBeVisibleAsync();
+        await portal.BrokenSubmitButton.ClickAsync();
 
-        IHealableLocatorMetadata? metadata = brokenButton.GetHealMetadata();
+        IHealableLocatorMetadata? metadata = portal.BrokenSubmitButton.GetHealMetadata();
         Assert.That(metadata, Is.Not.Null);
         Assert.Multiple(() =>
         {
+            Assert.That(pipelineCallCount, Is.EqualTo(1));
+            Assert.That(capturedRequest, Is.Not.Null);
+            Assert.That(capturedRequest!.ActionName, Is.EqualTo(nameof(ILocatorAssertions.ToBeVisibleAsync)));
+            Assert.That(capturedRequest.DomMatchCount, Is.EqualTo(0));
             Assert.That(metadata!.WasHealed, Is.True);
             Assert.That(metadata.LastHealingResult, Is.Not.Null);
             Assert.That(metadata.LastHealingResult!.HealedSelector, Is.EqualTo("internal:role=button[name=\"Complete Sign In\"i]"));
@@ -160,5 +170,41 @@ public sealed class Week1InterceptionTests : HealablePageTest
 
         string? clickedAttr = await Page.Locator("#v2-submit").GetAttributeAsync("data-clicked");
         Assert.That(clickedAttr, Is.EqualTo("true"));
+    }
+
+    [Test]
+    public async Task FastFailWindow_InterceptsHiddenElementIn1500MsWithDomMatchCountOne()
+    {
+        await Page.SetContentAsync(GreenPortalHtml);
+
+        RecoveryRequest? capturedRequest = null;
+        RecoveryPipeline = new DelegateRecoveryPipeline(request =>
+        {
+            capturedRequest = request;
+            return null;
+        });
+
+        var portal = new SamplePortalPage(Page);
+
+        var sw = Stopwatch.StartNew();
+        PlaywrightException? caught = null;
+        try
+        {
+            await portal.ErrorToast.ClickAsync();
+        }
+        catch (PlaywrightException ex)
+        {
+            caught = ex;
+        }
+        sw.Stop();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(caught, Is.Not.Null);
+            Assert.That(sw.ElapsedMilliseconds, Is.LessThan(4000));
+            Assert.That(capturedRequest, Is.Not.Null);
+            Assert.That(capturedRequest!.ActionName, Is.EqualTo(nameof(ILocator.ClickAsync)));
+            Assert.That(capturedRequest.DomMatchCount, Is.EqualTo(1));
+        });
     }
 }
