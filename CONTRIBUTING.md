@@ -117,3 +117,13 @@ benchmarks/
 * **Don't Mask Healed Locators:** Once Shadow Retry + `[TearDown]` gating is enabled (Month 4+), let `LocatorHealedWarningException` fail the test in `[TearDown]` so broken locators are never silently ignored in CI.
 
 ---
+
+## Branching Strategy
+
+* **Keep `main` Green:** `main` should always build and pass `dotnet test`. Do new work on short-lived feature/milestone branches (e.g., one branch per week or pipeline stage).
+* **Branch Naming:** `<type>/<short-kebab-description>` matching the commit types above:
+  * `feat/week1-interception`
+  * `feat/week2-dom-extractor`
+  * `fix/strict-mode-rca`
+  * `bench/webrl-dataset`
+  * `docs/chapter2-similo`
